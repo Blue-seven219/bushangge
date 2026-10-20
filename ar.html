@@ -64,7 +64,14 @@
   <!-- ===== AR 场景容器 =====
        autoStart: false —— 关键！不让页面一打开就请求摄像头，
        必须等用户点击遮罩后，由脚本手动调用 start() 才开启摄像头 -->
-  <div id="ar-root">
+  <div id="ar-root"></div>
+
+  <!-- 场景先放在模板里，等 A-Frame / MindAR 都就绪后再挂载。
+       如果让它一开始就在 DOM 里，A-Frame 一加载就会去初始化它，
+       那时 MindAR 还没注册 mindar-image-system —— 场景初始化带崩整个流程，
+       连 window.AFRAME 都挂不上，最后只能退到 2D 模式。
+       autoStart: false 保持不变，摄像头仍由点击遮罩后手动开启。 -->
+  <template id="scene-tpl">
     <a-scene
       id="scene"
       embedded
@@ -91,7 +98,7 @@
         <a-plane class="badge" position="0 0.33 0.01" width="0.84" height="0.2" material="shader: flat; transparent: true; opacity: 0;"></a-plane>
       </a-entity>
     </a-scene>
-  </div>
+  </template>
 
   <!-- 顶部小按钮：返回入口页 / 手动切换 2D 模式 -->
   <header class="ar-top">
@@ -504,6 +511,13 @@
     }
 
     function continueAfterLibs() {
+      // 先把场景挂上去 —— 必须等两个库都就绪后再建，
+      // 早了会让 A-Frame 抢在 MindAR 注册 mindar-image-system 之前初始化场景
+      if (!document.getElementById('scene')) {
+        var tpl = document.getElementById('scene-tpl');
+        if (tpl) document.getElementById('ar-root').appendChild(tpl.content.cloneNode(true));
+      }
+
       // 前置检查 1：AR 库是否真的可用（断网 / CDN 不可用 / 脚本加载后运行出错，都转 2D）
       if (!window.AR_LIBS_OK || typeof window.AFRAME === 'undefined' || typeof window.MINDAR === 'undefined') {
         enterFallback('AR 组件未能从网络加载，已切换为 2D 模式。联网刷新可重试');
