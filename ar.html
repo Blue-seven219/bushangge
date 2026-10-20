@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <!-- maximum-scale/user-scalable：防止手机上误触缩放，遮罩必须能点到 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>AR 体验 · 布上歌</title>
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- ===== 依赖库（全部 CDN 引入，无构建工具）=====
+       1) A-Frame 1.5.0：3D 场景基础库
+       2) MindAR 1.2.5：图像识别（A-Frame 版）
+       必须先有 A-Frame，再有 MindAR。
+       每个库写了 3 个下载地址，第一个失败自动换下一个（国内网络偶尔不稳，比赛现场更保险）。
+       这段一般不用改。 -->
+  <script>
+    // 依次尝试一组地址，加载成功一个就算成功，全部失败才算失败
+    function loadLib(urls, done) {
+      var i = 0;
+      (function tryNext() {
+        if (i >= urls.length) { done(false); return; }
+        var s = document.createElement('script');
+        s.src = urls[i++];
+        s.onload = function () { done(true); };  // 这个地址成功
+        s.onerror = tryNext;                     // 这个地址失败，换下一个
+        document.head.appendChild(s);
+      })();
+    }
+
+    // A-Frame 的备用地址（jsdelivr → jsdelivr 国内镜像 → unpkg）
+    var AFRAME_URLS = [
+      'https://cdn.jsdelivr.net/npm/aframe@1.5.0/dist/aframe-v1.5.0.min.js',
+      'https://cdn.jsdmirror.com/npm/aframe@1.5.0/dist/aframe-v1.5.0.min.js',
+      'https://unpkg.com/aframe@1.5.0/dist/aframe-v1.5.0.min.js'
+    ];
+    // MindAR 的备用地址
+    var MINDAR_URLS = [
+      'https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js',
+      'https://cdn.jsdmirror.com/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js',
+      'https://unpkg.com/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js'
+    ];
+
+    // 严格按顺序加载：A-Frame 成功后才加载 MindAR
+    loadLib(AFRAME_URLS, function (okA) {
+      loadLib(MINDAR_URLS, function (okM) {
+        window.AR_LIBS_OK = !!(okA && okM);
+        window.AR_LIBS_SETTLED = true;
+        // 通知下方主逻辑：库已就绪（或彻底失败）
+        if (typeof window.onArLibsSettled === 'function') window.onArLibsSettled();
+      });
+    });
+  </script>
+</head>
+
+<body class="page-ar">
+
+  <!-- ===== AR 场景容器 =====
+       autoStart: false —— 关键！不让页面一打开就请求摄像头，
+       必须等用户点击遮罩后，由脚本手动调用 start() 才开启摄像头 -->
+  <div id="ar-root">
+    <a-scene
+      id="scene"
+      embedded
+      color-space="sRGB"
+      renderer="colorManagement: true; physicallyCorrectLights: true;"
+      vr-mode-ui="enabled: false"
+      mindar-image="imageTargetSrc: assets/targets.mind; maxTrack: 1; autoStart: false; uiLoading: no; uiScanning: no; uiError: no;"
+    >
+      <!-- 相机固定不动（识别类 AR 不需要手动转视角） -->
+      <a-camera position="0 0 0" look-controls="enabled: false" cursor="fuse: false; rayOrigin: mouse;"></a-camera>
+
+      <!-- 三张纹样卡的识别锚点：targetIndex 0/1/2 对应 targets.mind 里的三个靶图
+           （即编译时上传的 card1 / card2 / card3 顺序）。
+           .badge 是贴在卡片上的小布签，纹理用脚本画好后贴上（Canvas 画中文不受字体限制）。-->
+      <a-entity id="target-0" mindar-image-target="targetIndex: 0">
+        <a-plane class="badge" position="0 0.33 0.01" width="0.84" height="0.2" material="shader: flat; transparent: true; opacity: 0;"></a-plane>
+      </a-entity>
+
+      <a-entity id="target-1" mindar-image-target="targetIndex: 1">
+        <a-plane class="badge" position="0 0.33 0.01" width="0.84" height="0.2" material="shader: flat; transparent: true; opacity: 0;"></a-plane>
+      </a-entity>
+
+      <a-entity id="target-2" mindar-image-target="targetIndex: 2">
+        <a-plane class="badge" position="0 0.33 0.01" width="0.84" height="0.2" material="shader: flat; transparent: true; opacity: 0;"></a-plane>
+      </a-entity>
+    </a-scene>
+  </div>
+
+  <!-- 顶部小按钮：返回入口页 / 手动切换 2D 模式 -->
+  <header class="ar-top">
+    <a class="ar-btn" href="index.html">← 返回</a>
+    <button class="ar-btn" id="btn-2d" type="button">2D 模式</button>
+  </header>
+
+  <!-- 中部提示语（对准纹样卡 / 正在开启摄像头） -->
+  <p class="ar-tip" id="ar-tip"></p>
+
+  <!-- 歌词浮层：识别到卡时淡入，丢失目标时淡出 -->
+  <div class="lyric-bar" id="lyric-bar">
+    <p class="lyric-title" id="lyric-title"></p>
+    <div class="lyric-text" id="lyric-text"></div>
+    <button class="lyric-close" id="lyric-close" type="button">关闭</button>
+  </div>
+
+  <!-- 启动遮罩：解决浏览器“必须由用户点击后才能播声音/开摄像头”的限制 -->
+  <div class="start-mask" id="start-mask">
+    <p class="start-title">布上歌</p>
+    <p class="start-sub">惠水布依族枫香染 × 民歌《好花红》</p>
+    <div class="start-btn">点击屏幕 开始体验</div>
+    <p class="start-hint">需要使用摄像头 · 请允许浏览器授权</p>
+  </div>
+
+  <!-- 2D 降级模式：摄像头不可用时出现，点击卡片同样可以听歌看词 -->
+  <div class="fallback" id="fallback" hidden>
+    <div class="fallback-head">
+      <h2>2D 模式</h2>
+      <p id="fallback-reason">点击纹样卡，听一段歌</p>
+    </div>
+    <div class="fallback-grid">
+      <button class="fallback-card" type="button" data-index="0">
+        <img src="assets/card1.jpg" alt="纹样卡一 · 唱花" />
+        <span>卡一 · 起 · 唱花</span>
+      </button>
+      <button class="fallback-card" type="button" data-index="1">
+        <img src="assets/card2.jpg" alt="纹样卡二 · 咏情" />
+        <span>卡二 · 承 · 咏情</span>
+      </button>
+      <button class="fallback-card" type="button" data-index="2">
+        <img src="assets/card3.jpg" alt="纹样卡三 · 收腔" />
+        <span>卡三 · 合 · 收腔</span>
+      </button>
+    </div>
+    <div class="fallback-actions">
+      <button class="btn" id="btn-retry-ar" type="button">重新尝试 AR</button>
+    </div>
+  </div>
+
+  <!-- 轻提示条：缺音频文件等友好提示（不报错） -->
+  <div class="toast" id="toast"></div>
+
+  <script>
+  /* ============================================================
+     《布上歌》AR 逻辑
+     三张纹样卡 → 三段唱腔 → 三段歌词
+     识别到第 i 张卡：播放 song_i.mp3 + 显示对应歌词
+     丢失目标：暂停音频 + 隐藏歌词
+     摄像头不可用：自动降级为 2D 点选模式
+     ============================================================ */
+  (function () {
+    'use strict';
+
+    // ---------- 1. 三张卡的数据（改歌词/换音频只改这里） ----------
+    var CARDS = [
+      {
+        label: '起 · 唱花',
+        audio: 'assets/song_1.mp3',
+        lyrics: '好花红哎好花红哟\n好花生在茨梨蓬哎\n好花生在茨梨树哎\n哪朵向阳哪朵红哎'
+      },
+      {
+        label: '承 · 咏情',
+        audio: 'assets/song_2.mp3',
+        lyrics: '好久不到这方来哎\n朵朵鲜花遍坡开哎\n金花丢了还会有哎\n情意丢了不再来哎'
+      },
+      {
+        label: '合 · 收腔',
+        audio: 'assets/song_3.mp3',
+        lyrics: '哪朵红哟哟哟咦哟咦\n哪朵鲜哎'
+      }
+    ];
+
+    // ---------- 2. 页面元素 ----------
+    var startMask = document.getElementById('start-mask');
+    var fallbackEl = document.getElementById('fallback');
+    var fallbackReason = document.getElementById('fallback-reason');
+    var lyricBar = document.getElementById('lyric-bar');
+    var lyricTitle = document.getElementById('lyric-title');
+    var lyricText = document.getElementById('lyric-text');
+    var arTip = document.getElementById('ar-tip');
+    var toastEl = document.getElementById('toast');
+
+    // ---------- 3. 运行状态 ----------
+    var audios = [];          // 三个 Audio 对象
+    var audioLoadFailed = []; // 记录哪些音频文件加载失败（缺文件时友好提示用）
+    var currentIndex = -1;    // 当前正在播的唱段序号，-1 表示无
+    var arStarted = false;    // 摄像头是否已启动
+    var arReady = false;      // AR 引擎是否就绪
+    var tipTimer = null;
+    var toastTimer = null;
+    var missingAudioWarned = {}; // 记录已提示过的缺音频，避免反复弹
+
+    // ---------- 4. 小工具 ----------
+    function showToast(msg, duration) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('is-show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(function () {
+        toastEl.classList.remove('is-show');
+      }, duration || 3200);
+    }
+
+    function showTip(msg) {
+      arTip.textContent = msg;
+      arTip.classList.add('is-show');
+    }
+
+    function hideTip() {
+      arTip.classList.remove('is-show');
+    }
+
+    // ---------- 5. 音频：创建与播放 ----------
+    // 在用户点击遮罩后才创建 Audio，帮助 iOS 等浏览器解锁自动播放
+    function initAudios() {
+      for (var i = 0; i < CARDS.length; i++) {
+        var a = new Audio();
+        a.preload = 'auto';
+        a.src = CARDS[i].audio;
+
+        // 文件加载失败（不存在/格式不支持）先默默记下，
+        // 等真正要播它的时候再给友好提示（而不是一进页面就弹错）
+        (function (index, audio) {
+          audio.addEventListener('error', function () {
+            audioLoadFailed[index] = true;
+          });
+        })(i, a);
+
+        audios.push(a);
+      }
+    }
+
+    // 点击遮罩时“摸一下”每个音频：静音播放再立刻暂停，
+    // 这样后续 targetFound 里的 play() 在 iOS 上才不会被拦截
+    function unlockAudios() {
+      audios.forEach(function (a) {
+        a.muted = true;
+        var p = a.play();
+        if (p && p.then) {
+          p.then(function () {
+            a.pause();
+            a.currentTime = 0;
+            a.muted = false;
+          }).catch(function () {
+            a.muted = false;
+          });
+        } else {
+          a.pause();
+          a.muted = false;
+        }
+      });
+    }
+
+    function warnMissingAudio(index) {
+      if (missingAudioWarned[index]) return;
+      missingAudioWarned[index] = true;
+      showToast('未找到 ' + CARDS[index].audio + '，请按 README 把唱段放进 assets 文件夹', 5000);
+    }
+
+    // 播放第 i 段（歌词照常显示，缺音频只是提示）
+    function playSong(index) {
+      // 先停掉其它唱段，避免叠音
+      for (var i = 0; i < audios.length; i++) {
+        if (i !== index && !audios[i].paused) {
+          audios[i].pause();
+        }
+      }
+      var a = audios[index];
+      if (!a) return;
+
+      // 播完了再识别到同一张卡，就从头播
+      if (a.ended) a.currentTime = 0;
+
+      // 文件缺失：歌词照常显示，只弹一次针对当前唱段的友好提示
+      if (audioLoadFailed[index]) {
+        warnMissingAudio(index);
+        currentIndex = index;
+        return;
+      }
+
+      var p = a.play();
+      if (p && p.catch) {
+        p.catch(function () {
+          // play() 被拒绝或文件缺失：友好提示（error 事件可能更早触发，有去重）
+          warnMissingAudio(index);
+        });
+      }
+      currentIndex = index;
+    }
+
+    function pauseSong() {
+      if (currentIndex >= 0 && audios[currentIndex]) {
+        audios[currentIndex].pause();
+      }
+    }
+
+    // ---------- 6. 歌词浮层 ----------
+    function showLyrics(index) {
+      lyricTitle.textContent = CARDS[index].label;
+      lyricText.textContent = CARDS[index].lyrics;
+      lyricBar.classList.add('is-show');
+    }
+
+    function hideLyrics() {
+      lyricBar.classList.remove('is-show');
+    }
+
+    // 识别到卡 i
+    function onCardFound(index) {
+      playSong(index);
+      showLyrics(index);
+    }
+
+    // 丢失目标
+    function onCardLost() {
+      pauseSong();
+      hideLyrics();
+    }
+
+    // ---------- 7. 卡上的小布签纹理 ----------
+    // 用 Canvas 画中文（系统宋体），生成纹理贴到卡片上，代替无法显示中文的 3D 文字
+    function makeBannerTexture(text) {
+      var W = 1024, H = 256;
+      var canvas = document.createElement('canvas');
+      canvas.width = W;
+      canvas.height = H;
+      var g = canvas.getContext('2d');
+
+      // 半透明靛蓝底
+      g.fillStyle = 'rgba(22, 41, 77, 0.78)';
+      g.fillRect(0, 0, W, H);
+
+      // 米白细线框
+      g.strokeStyle = 'rgba(245, 240, 230, 0.9)';
+      g.lineWidth = 4;
+      g.strokeRect(10, 10, W - 20, H - 20);
+
+      // 中文标签
+      g.fillStyle = '#f5f0e6';
+      g.font = '110px "Songti SC", "STSong", SimSun, serif';
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.fillText(text, W / 2, H / 2 + 4);
+
+      return canvas.toDataURL('image/png');
+    }
+
+    function applyBadges() {
+      for (var i = 0; i < CARDS.length; i++) {
+        var badge = document.querySelector('#target-' + i + ' .badge');
+        if (!badge) continue;
+        badge.setAttribute('material', {
+          src: makeBannerTexture(CARDS[i].label),
+          transparent: true,
+          opacity: 1,
+          shader: 'flat'
+        });
+      }
+    }
+
+    // ---------- 8. 2D 降级模式 ----------
+    function enterFallback(reason) {
+      hideTip();
+      hideLyrics();
+      pauseSong();
+      fallbackReason.textContent = reason || '点击纹样卡，听一段歌';
+      fallbackEl.hidden = false;
+    }
+
+    function bindFallbackCards() {
+      var buttons = fallbackEl.querySelectorAll('.fallback-card');
+      for (var i = 0; i < buttons.length; i++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            var index = parseInt(btn.getAttribute('data-index'), 10);
+            // 高亮当前选中的卡
+            for (var j = 0; j < buttons.length; j++) buttons[j].classList.remove('is-active');
+            btn.classList.add('is-active');
+            onCardFound(index); // 与 AR 模式同一套：放歌 + 出词
+          });
+        })(buttons[i]);
+      }
+    }
+
+    // ---------- 9. 启动 AR ----------
+    function whenSceneReady(cb) {
+      var sceneEl = document.getElementById('scene');
+      var settled = false;
+
+      // 兜底：如果 AR 场景迟迟没初始化好（设备不支持 WebGL 等），10 秒后转 2D
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        enterFallback('AR 画面初始化超时（设备可能不支持 WebGL），已切换为 2D 模式');
+      }, 10000);
+
+      function fire() {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        cb(sceneEl);
+      }
+
+      if (sceneEl.hasLoaded) {
+        fire();
+      } else {
+        sceneEl.addEventListener('loaded', fire);
+      }
+    }
+
+    // 等 MindAR 报告 arReady；超时说明靶图文件可能有问题，给出提示
+    var readyWatchdog = null;
+    function startWatchdog() {
+      clearTimeout(readyWatchdog);
+      readyWatchdog = setTimeout(function () {
+        if (!arReady) {
+          showTip('识别引擎加载较慢或靶图缺失，可点右上角「2D 模式」');
+        }
+      }, 15000);
+    }
+
+    function startAR() {
+      whenSceneReady(function (sceneEl) {
+        // 先挂上事件：AR 就绪 / 摄像头出错
+        sceneEl.addEventListener('arReady', function () {
+          arReady = true;
+          clearTimeout(readyWatchdog);
+          showTip('对准纹样卡 · 听一段歌');
+        });
+
+        sceneEl.addEventListener('arError', function () {
+          // 摄像头被拒绝 / 设备不支持 / 非安全来源
+          var reason = (!window.isSecureContext)
+            ? '当前是 http 手机访问，浏览器不允许开启摄像头（需 https 或电脑 localhost）。可扫码听歌，或部署到 GitHub Pages 后体验 AR'
+            : '无法开启摄像头，已切换为 2D 模式';
+          enterFallback(reason);
+        });
+
+        // 给三张卡挂识别事件
+        for (var i = 0; i < CARDS.length; i++) {
+          (function (index) {
+            var el = document.getElementById('target-' + index);
+            if (!el) return;
+            el.addEventListener('targetFound', function () {
+              if (!fallbackEl.hidden) return; // 已在 2D 模式时忽略
+              onCardFound(index);
+            });
+            el.addEventListener('targetLost', function () {
+              if (!fallbackEl.hidden) return;
+              onCardLost();
+            });
+          })(i);
+        }
+
+        // 画好卡片上的布签
+        applyBadges();
+
+        // 一切就绪，手动启动摄像头（对应 mindar-image 里的 autoStart: false）
+        var sys = sceneEl.systems['mindar-image-system'];
+        if (!sys || typeof sys.start !== 'function') {
+          enterFallback('AR 引擎未能启动，已切换为 2D 模式');
+          return;
+        }
+        arStarted = true;
+        showTip('正在开启摄像头…');
+        startWatchdog();
+        sys.start();
+      });
+    }
+
+    // ---------- 10. 用户点击遮罩 → 正式开始 ----------
+    var waitingLibs = false; // 用户已点击，但 AR 库还在从网络加载
+
+    // 库加载结束（成功或彻底失败）后，若用户已点过开始，就接着往下走
+    window.onArLibsSettled = function () {
+      if (waitingLibs) {
+        waitingLibs = false;
+        continueAfterLibs();
+      }
+    };
+
+    function beginExperience() {
+      // 遮罩淡出后移除
+      startMask.classList.add('is-hidden');
+      setTimeout(function () {
+        startMask.style.display = 'none';
+      }, 750);
+
+      // 音频就绪 + 解锁（必须留在用户的这次点击里，浏览器才允许之后出声）
+      initAudios();
+      unlockAudios();
+
+      // AR 库若还在下载，先等它加载完（loadLib 完成后会回来调 continueAfterLibs）
+      if (!window.AR_LIBS_SETTLED) {
+        waitingLibs = true;
+        showTip('正在加载 AR 组件…');
+        return;
+      }
+      continueAfterLibs();
+    }
+
+    function continueAfterLibs() {
+      // 前置检查 1：AR 库是否真的可用（断网 / CDN 不可用 / 脚本加载后运行出错，都转 2D）
+      if (!window.AR_LIBS_OK || typeof window.AFRAME === 'undefined' || typeof window.MINDAR === 'undefined') {
+        enterFallback('AR 组件未能从网络加载，已切换为 2D 模式。联网刷新可重试');
+        return;
+      }
+
+      // 前置检查 2：浏览器是否允许用摄像头
+      // （file:// 双击打开、手机 http 访问都会走到这里）
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        var reason = (!window.isSecureContext)
+          ? '浏览器不允许在当前地址开启摄像头（需 https 或电脑 localhost）。可点击卡片听歌看词，或用 Live Server 在电脑上体验 AR'
+          : '当前浏览器不支持摄像头，已切换为 2D 模式';
+        enterFallback(reason);
+        return;
+      }
+
+      // 前置检查 3：靶图文件 targets.mind 是否已生成
+      // （用 fetch 探测，404 时给出指向 README 的提示，而不是让 AR 默默挂掉）
+      showTip('正在检查识别资源…');
+      fetch('assets/targets.mind')
+        .then(function (res) {
+          if (!res.ok) throw new Error('missing');
+          return res;
+        })
+        .then(function () {
+          startAR();
+        })
+        .catch(function () {
+          enterFallback('未找到 assets/targets.mind，请按 README「生成 AR 靶图」一节操作');
+        });
+    }
+
+    // ---------- 11. 绑定页面交互 ----------
+    startMask.addEventListener('click', beginExperience);
+
+    document.getElementById('btn-2d').addEventListener('click', function () {
+      if (fallbackEl.hidden) {
+        enterFallback('点击纹样卡，听一段歌');
+      }
+    });
+
+    document.getElementById('btn-retry-ar').addEventListener('click', function () {
+      // 最简单可靠的重试：刷新页面，重新走一遍授权流程
+      window.location.reload();
+    });
+
+    document.getElementById('lyric-close').addEventListener('click', function () {
+      pauseSong();
+      hideLyrics();
+    });
+
+    // 切到后台时停唱，回来再扫
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) pauseSong();
+    });
+
+    bindFallbackCards();
+  })();
+  </script>
+</body>
+</html>
