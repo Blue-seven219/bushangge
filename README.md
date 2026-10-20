@@ -250,10 +250,10 @@ GitHub Pages 免费、自带 HTTPS，手机打开即用 AR。第一次操作约 
 - 微信里打不开就换系统浏览器
 - 都不行就点右上角「2D 模式」，照样能听歌看词
 
-**Q：提示「AR 识别组件未能初始化（A-Frame / MindAR）」**
-- AR 的两个识别组件已经随项目托管在 `assets/` 里，**不再依赖境外 CDN**，所以联不联网都不影响组件加载
-- 看到这句多半是 `assets/aframe-v1.5.0.min.js`（约 1.3MB）或 `assets/mindar-image-aframe.prod.js`（约 1.7MB）没传上去或传残了，确认这两个文件在 `assets` 里、大小正常
-- 也可能是浏览器不支持 WebGL（很旧的设备），换 Chrome / Safari / 系统浏览器再试
+**Q：提示「AR 组件未能从网络加载」**
+- AR 的两个识别组件（A-Frame、MindAR）是从 CDN 加载的，打开 AR 页时需要能上网
+- 代码里给每个库准备了 3 个下载地址自动切换（jsdelivr → 国内镜像 → unpkg），一般不用管
+- 网络断了会自动转成 2D 模式（不影响听歌看词）；恢复网络后刷新页面即可重试
 
 **Q：提示「未找到 assets/targets.mind」**
 - 说明靶图文件没放进 `assets` 文件夹，或名字不对
@@ -304,9 +304,8 @@ bushangge/
     ├── song_2.mp3    唱段二
     ├── song_3.mp3    唱段三
     ├── film-poster.jpg  短片封面图
-    ├── bg.mp4        介绍页背景视频
-    ├── aframe-v1.5.0.min.js           AR 基础库（本地托管，1.3MB）
-    └── mindar-image-aframe.prod.js    AR 图像识别库（本地托管，1.7MB）
+    ├── qr.png        入口二维码（评委微信扫一扫进站用）
+    └── bg.mp4        介绍页背景视频
 ```
 
 ---

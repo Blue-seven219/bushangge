@@ -7,19 +7,55 @@
   <title>AR 体验 · 布上歌</title>
   <link rel="stylesheet" href="style.css" />
 
-  <!-- ===== 依赖库（本地托管，不依赖境外 CDN）=====
+  <!-- ===== 依赖库（全部 CDN 引入，无构建工具）=====
        1) A-Frame 1.5.0：3D 场景基础库
        2) MindAR 1.2.5：图像识别（A-Frame 版）
-       ⚠ 必须先有 A-Frame，再有 MindAR——MindAR 顶层代码要用全局 AFRAME，
-         顺序颠倒会抛 "AFRAME is not defined"，两个库都会挂掉。
-       这里用阻塞式 <script src>（不是动态注入），顺序绝对可靠；
-       两个库都在项目内，从 GitHub Pages 同源加载，国内网络不抖。 -->
-  <script src="assets/aframe-v1.5.0.min.js"></script>
-  <script src="assets/mindar-image-aframe.prod.js"></script>
+       必须先有 A-Frame，再有 MindAR——MindAR 顶层代码要用全局 AFRAME，
+       抢跑会抛 "AFRAME is not defined"，两个库都会挂掉。
+       所以不只等 onload，还要确认全局真的挂上，才去加载下一个。
+       每个库写了 3 个下载地址，第一个失败自动换下一个（国内网络偶尔不稳，比赛现场更保险）。
+       这段一般不用改。 -->
   <script>
-    // 两个库都必须挂上全局，否则下面直接转 2D 并给出准确提示
-    window.AR_LIBS_OK = (typeof window.AFRAME !== 'undefined' && typeof window.MINDAR !== 'undefined');
-    window.AR_LIBS_SETTLED = true;
+    // 依次尝试一组地址；onload 之后还要确认全局已注册，才算真的成功
+    function loadLib(urls, globalName, done) {
+      var i = 0;
+      (function tryNext() {
+        if (i >= urls.length) { done(false); return; }
+        var s = document.createElement('script');
+        s.src = urls[i++];
+        s.async = false;   // 按插入顺序执行，别让浏览器乱序跑
+        s.onload = function () {
+          // 关键：onload ≠ 可用。脚本若中途抛错，onload 仍会触发，但全局没挂上
+          if (typeof window[globalName] !== 'undefined') { done(true); }
+          else { tryNext(); }
+        };
+        s.onerror = tryNext;
+        document.head.appendChild(s);
+      })();
+    }
+
+    // A-Frame 的备用地址（jsdelivr → jsdelivr 国内镜像 → unpkg）
+    var AFRAME_URLS = [
+      'https://cdn.jsdelivr.net/npm/aframe@1.5.0/dist/aframe-v1.5.0.min.js',
+      'https://cdn.jsdmirror.com/npm/aframe@1.5.0/dist/aframe-v1.5.0.min.js',
+      'https://unpkg.com/aframe@1.5.0/dist/aframe-v1.5.0.min.js'
+    ];
+    // MindAR 的备用地址
+    var MINDAR_URLS = [
+      'https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js',
+      'https://cdn.jsdmirror.com/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js',
+      'https://unpkg.com/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js'
+    ];
+
+    // 严格串行：A-Frame 的全局 AFRAME 确认挂上之后，才开始加载 MindAR
+    loadLib(AFRAME_URLS, 'AFRAME', function (okA) {
+      loadLib(MINDAR_URLS, 'MINDAR', function (okM) {
+        window.AR_LIBS_OK = !!(okA && okM);
+        window.AR_LIBS_SETTLED = true;
+        // 通知下方主逻辑：库已就绪（或彻底失败）
+        if (typeof window.onArLibsSettled === 'function') window.onArLibsSettled();
+      });
+    });
   </script>
 </head>
 
@@ -470,7 +506,7 @@
     function continueAfterLibs() {
       // 前置检查 1：AR 库是否真的可用（断网 / CDN 不可用 / 脚本加载后运行出错，都转 2D）
       if (!window.AR_LIBS_OK || typeof window.AFRAME === 'undefined' || typeof window.MINDAR === 'undefined') {
-        enterFallback('AR 识别组件未能初始化（A-Frame / MindAR），已切换为 2D 模式');
+        enterFallback('AR 组件未能从网络加载，已切换为 2D 模式。联网刷新可重试');
         return;
       }
 
